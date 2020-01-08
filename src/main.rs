@@ -3,7 +3,7 @@ mod icon;
 use std::fs::File;
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Command, Output};
 use std::time::SystemTime;
 
 use anyhow::Result;
@@ -139,8 +139,33 @@ macro_rules! println_json {
   }
 }
 
-fn set_cmd_dir(cmd: &mut Command, cmd_dir: Option<PathBuf>) -> &mut Command {
-    if let Some(cmd_dir) = cmd_dir.clone() {
+fn tempfile(args: &[String]) -> Result<PathBuf> {
+    let mut dir = std::env::temp_dir();
+    dir.push(format!(
+        "{}_{}",
+        args.join("_"),
+        SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)?
+            .as_secs()
+    ));
+    Ok(dir)
+}
+
+fn cmd_output(cmd: &mut Command) -> Result<Output> {
+    let cmd_output = cmd.output()?;
+
+    // vim-clap does not handle the stderr stream, we just pass the error info via stdout.
+    if !cmd_output.status.success() && !cmd_output.stderr.is_empty() {
+        let error = format!("{}", String::from_utf8_lossy(&cmd_output.stderr));
+        println_json!(error);
+        std::process::exit(1);
+    }
+
+    Ok(cmd_output)
+}
+
+fn set_current_dir(cmd: &mut Command, cmd_dir: Option<PathBuf>) {
+    if let Some(cmd_dir) = cmd_dir {
         if cmd_dir.is_dir() {
             cmd.current_dir(cmd_dir);
         } else {
@@ -149,170 +174,89 @@ fn set_cmd_dir(cmd: &mut Command, cmd_dir: Option<PathBuf>) -> &mut Command {
             cmd.current_dir(cmd_dir);
         }
     }
+}
+
+fn prepare_grep_and_args(cmd_str: &str, cmd_dir: Option<PathBuf>) -> (Command, Vec<String>) {
+    let args = cmd_str
+        .split_whitespace()
+        .map(Into::into)
+        .collect::<Vec<String>>();
+
+    let mut cmd = Command::new(args[0].clone());
+
+    set_current_dir(&mut cmd, cmd_dir);
+
+    (cmd, args)
+}
+
+// This can work with the piped command, e.g., git ls-files | uniq.
+fn prepare_exec_cmd(cmd_str: &str, cmd_dir: Option<PathBuf>) -> Command {
+    let mut cmd = if cfg!(target_os = "windows") {
+        let mut cmd = Command::new("cmd");
+        cmd.args(&["/C", cmd_str]);
+        cmd
+    } else {
+        let mut cmd = Command::new("bash");
+        cmd.arg("-c").arg(cmd_str);
+        cmd
+    };
+
+    set_current_dir(&mut cmd, cmd_dir);
+
     cmd
 }
 
+fn truncate_stdout(stdout: &[u8], number: usize) -> Vec<String> {
+    // TODO: do not have to into String for whole stdout, find the nth index of newline.
+    // &cmd_output.stdout[..nth_newline_index]
+    let stdout_str = String::from_utf8_lossy(&stdout);
+    let mut lines = stdout_str
+        .split('\n')
+        .take(number)
+        .map(Into::into)
+        .collect::<Vec<_>>();
+    trim_trailing(&mut lines);
+    lines
+}
+
 impl Maple {
-    /*
-    fn to_string_and_cache_if_threshold_exceeded(
-        &self,
-        total: usize,
-        cmd_stdout: &[u8],
-        args: &[String],
-    ) -> Result<(String, Option<PathBuf>)> {
-        if total > self.output_threshold {
-            let tempfile = if let Some(ref output) = self.output {
-                output.into()
-            } else {
-                let mut dir = std::env::temp_dir();
-                dir.push(format!(
-                    "{}_{}",
-                    args.join("_"),
-                    SystemTime::now()
-                        .duration_since(SystemTime::UNIX_EPOCH)?
-                        .as_secs()
-                ));
-                dir
-            };
-            File::create(tempfile.clone())?.write_all(cmd_stdout)?;
-            // FIXME find the nth newline index of stdout.
-            let _end = std::cmp::min(cmd_stdout.len(), 500);
-            Ok((
-                // lines used for displaying directly.
-                // &cmd_output.stdout[..nth_newline_index]
-                String::from_utf8_lossy(cmd_stdout).into(),
-                Some(tempfile),
-            ))
-        } else {
-            Ok((String::from_utf8_lossy(cmd_stdout).into(), None))
-        }
-    }
-    */
-
-    fn to_string_and_cache_if_threshold_exceeded_cmd(
-        &self,
-        total: usize,
-        cmd_stdout: &[u8],
-        args: &[String],
-        output: Option<String>,
-        output_threshold: usize,
-    ) -> Result<(String, Option<PathBuf>)> {
-        if total > output_threshold {
-            let tempfile = if let Some(ref output) = output {
-                output.into()
-            } else {
-                let mut dir = std::env::temp_dir();
-                dir.push(format!(
-                    "{}_{}",
-                    args.join("_"),
-                    SystemTime::now()
-                        .duration_since(SystemTime::UNIX_EPOCH)?
-                        .as_secs()
-                ));
-                dir
-            };
-            File::create(tempfile.clone())?.write_all(cmd_stdout)?;
-            // FIXME find the nth newline index of stdout.
-            let _end = std::cmp::min(cmd_stdout.len(), 500);
-            Ok((
-                // lines used for displaying directly.
-                // &cmd_output.stdout[..nth_newline_index]
-                String::from_utf8_lossy(cmd_stdout).into(),
-                Some(tempfile),
-            ))
-        } else {
-            Ok((String::from_utf8_lossy(cmd_stdout).into(), None))
-        }
-    }
-
-    /*
-    fn execute_impl(&self, cmd: &mut Command, args: &[String]) -> Result<()> {
-        let cmd_output = cmd.output()?;
-
-        if !cmd_output.status.success() && !cmd_output.stderr.is_empty() {
-            let error = format!("{}", String::from_utf8_lossy(&cmd_output.stderr));
-            println_json!(error);
-            std::process::exit(1);
-        }
-
-        let total = bytecount::count(&cmd_output.stdout, b'\n');
-
-        if let Some(number) = self.number {
-            // TODO: do not have to into String for whole stdout, find the nth index of newline.
-            // &cmd_output.stdout[..nth_newline_index]
-            let stdout_str = String::from_utf8_lossy(&cmd_output.stdout);
-            let mut lines = stdout_str
-                .split('\n')
-                .take(number)
-                .map(Into::into)
-                .collect::<Vec<_>>();
-            trim_trailing(&mut lines);
-            println_json!(total, lines);
-            return Ok(());
-        }
-
-        // Write the output to a tempfile if the lines are too many.
-        let (stdout_str, tempfile) =
-            self.to_string_and_cache_if_threshold_exceeded(total, &cmd_output.stdout, args)?;
-
-        let mut lines = if self.enable_icon {
-            stdout_str.split('\n').map(prepend_icon).collect::<Vec<_>>()
-        } else {
-            stdout_str.split('\n').map(Into::into).collect::<Vec<_>>()
-        };
-
-        // The last element could be a empty string.
-        trim_trailing(&mut lines);
-
-        if let Some(tempfile) = tempfile {
-            println_json!(total, lines, tempfile);
-        } else {
-            println_json!(total, lines);
-        }
-
-        Ok(())
-    }
-    */
-
     fn execute_cmd_impl(
         &self,
         cmd: &mut Command,
         args: &[String],
-        output: Option<String>,
+        output: &Option<String>,
         output_threshold: usize,
     ) -> Result<()> {
-        let cmd_output = cmd.output()?;
+        let cmd_output = cmd_output(cmd)?;
 
-        if !cmd_output.status.success() && !cmd_output.stderr.is_empty() {
-            let error = format!("{}", String::from_utf8_lossy(&cmd_output.stderr));
-            println_json!(error);
-            std::process::exit(1);
-        }
+        let cmd_stdout = &cmd_output.stdout;
 
-        let total = bytecount::count(&cmd_output.stdout, b'\n');
+        let total = bytecount::count(cmd_stdout, b'\n');
 
         if let Some(number) = self.number {
-            // TODO: do not have to into String for whole stdout, find the nth index of newline.
-            // &cmd_output.stdout[..nth_newline_index]
-            let stdout_str = String::from_utf8_lossy(&cmd_output.stdout);
-            let mut lines = stdout_str
-                .split('\n')
-                .take(number)
-                .map(Into::into)
-                .collect::<Vec<_>>();
-            trim_trailing(&mut lines);
+            let lines = truncate_stdout(cmd_stdout, number);
             println_json!(total, lines);
             return Ok(());
         }
 
-        // Write the output to a tempfile if the lines are too many.
-        let (stdout_str, tempfile) = self.to_string_and_cache_if_threshold_exceeded_cmd(
-            total,
-            &cmd_output.stdout,
-            args,
-            output,
-            output_threshold,
-        )?;
+        let (stdout_str, tempfile) = if total > output_threshold {
+            let tempfile = if let Some(ref output) = output {
+                output.into()
+            } else {
+                tempfile(args)?
+            };
+            File::create(tempfile.clone())?.write_all(cmd_stdout)?;
+            // FIXME find the nth newline index of stdout.
+            let _end = std::cmp::min(cmd_stdout.len(), 500);
+            (
+                // lines used for displaying directly.
+                // &cmd_output.stdout[..nth_newline_index]
+                String::from_utf8_lossy(cmd_stdout),
+                Some(tempfile),
+            )
+        } else {
+            (String::from_utf8_lossy(cmd_stdout), None)
+        };
 
         let mut lines = if self.enable_icon {
             stdout_str.split('\n').map(prepend_icon).collect::<Vec<_>>()
@@ -332,38 +276,97 @@ impl Maple {
         Ok(())
     }
 
-    fn prepare_grep_and_args(
+    fn apply_fuzzy_filter_and_rank(
         &self,
-        cmd_str: &str,
-        cmd_dir: Option<PathBuf>,
-    ) -> (Command, Vec<String>) {
-        let args = cmd_str
-            .split_whitespace()
-            .map(Into::into)
-            .collect::<Vec<String>>();
-        let mut cmd = Command::new(args[0].clone());
+        query: &str,
+        input: &Option<PathBuf>,
+        algo: &Option<Algo>,
+    ) -> Result<Vec<(String, f64, Vec<usize>)>> {
+        let algo = algo.as_ref().unwrap_or(&Algo::Fzy);
 
-        if let Some(cmd_dir) = cmd_dir.clone() {
-            if cmd_dir.is_dir() {
-                cmd.current_dir(cmd_dir);
-            } else {
-                let mut cmd_dir = cmd_dir;
-                cmd_dir.pop();
-                cmd.current_dir(cmd_dir);
+        let scorer = |line: &str| match algo {
+            Algo::Skim => {
+                fuzzy_indices(line, &query).map(|(score, indices)| (score as f64, indices))
             }
-        }
+            Algo::Fzy => match_and_score_with_positions(&query, line),
+        };
 
-        (cmd, args)
+        // Result<Option<T>> => T
+        let mut ranked = if let Some(input) = input {
+            std::fs::read_to_string(input)?
+                .par_lines()
+                .filter_map(|line| {
+                    scorer(&line).map(|(score, indices)| (line.into(), score, indices))
+                })
+                .collect::<Vec<_>>()
+        } else {
+            io::stdin()
+                .lock()
+                .lines()
+                .filter_map(|lines_iter| {
+                    lines_iter.ok().and_then(|line| {
+                        scorer(&line).map(|(score, indices)| (line, score, indices))
+                    })
+                })
+                .collect::<Vec<_>>()
+        };
+
+        ranked.par_sort_unstable_by(|(_, v1, _), (_, v2, _)| v2.partial_cmp(&v1).unwrap());
+
+        Ok(ranked)
     }
 
-    pub fn try_exec_grep(&self) -> Result<()> {
+    fn run(&self) -> Result<()> {
         match &self.command {
+            Cmd::Filter { query, input, algo } => {
+                let ranked = self.apply_fuzzy_filter_and_rank(query, input, algo)?;
+
+                if let Some(number) = self.number {
+                    let total = ranked.len();
+                    let payload = ranked.into_iter().take(number);
+                    let mut lines = Vec::with_capacity(number);
+                    let mut indices = Vec::with_capacity(number);
+                    if self.enable_icon {
+                        for (text, _, idxs) in payload {
+                            lines.push(prepend_icon(&text));
+                            indices.push(idxs);
+                        }
+                    } else {
+                        for (text, _, idxs) in payload {
+                            lines.push(text);
+                            indices.push(idxs);
+                        }
+                    }
+                    println_json!(total, lines, indices);
+                } else {
+                    for (text, _, indices) in ranked.iter() {
+                        println_json!(text, indices);
+                    }
+                }
+            }
+
+            Cmd::Exec {
+                cmd,
+                output,
+                cmd_dir,
+                output_threshold,
+            } => {
+                let mut exec_cmd = prepare_exec_cmd(cmd, cmd_dir.clone());
+
+                self.execute_cmd_impl(
+                    &mut exec_cmd,
+                    &cmd.split_whitespace().map(Into::into).collect::<Vec<_>>(),
+                    output,
+                    *output_threshold,
+                )?;
+            }
+
             Cmd::Grep {
                 grep_cmd,
                 grep_query,
                 cmd_dir,
             } => {
-                let (mut cmd, mut args) = self.prepare_grep_and_args(grep_cmd, cmd_dir.clone());
+                let (mut cmd, mut args) = prepare_grep_and_args(grep_cmd, cmd_dir.clone());
 
                 // We split out the grep opts and query in case of the possible escape issue of clap.
                 args.push(grep_query.clone());
@@ -376,133 +379,9 @@ impl Maple {
 
                 cmd.args(&args[1..]);
 
-                self.execute_cmd_impl(&mut cmd, &args, None, 100usize)?;
-
-                return Ok(());
-            }
-            _ => (),
-        }
-        Err(anyhow::Error::new(DummyError).context("No grep cmd specified"))
-    }
-
-    // This can work with the piped command, e.g., git ls-files | uniq.
-    fn prepare_cmd(&self, cmd_str: &str, cmd_dir: Option<PathBuf>) -> Command {
-        let mut cmd = if cfg!(target_os = "windows") {
-            let mut cmd = Command::new("cmd");
-            cmd.args(&["/C", cmd_str]);
-            cmd
-        } else {
-            let mut cmd = Command::new("bash");
-            cmd.arg("-c").arg(cmd_str);
-            cmd
-        };
-
-        if let Some(cmd_dir) = cmd_dir.clone() {
-            if cmd_dir.is_dir() {
-                cmd.current_dir(cmd_dir);
-            } else {
-                let mut cmd_dir = cmd_dir;
-                cmd_dir.pop();
-                cmd.current_dir(cmd_dir);
+                self.execute_cmd_impl(&mut cmd, &args, &None, 100usize)?;
             }
         }
-        cmd
-    }
-
-    pub fn try_exec_cmd(&self) -> Result<()> {
-        match &self.command {
-            Cmd::Exec {
-                cmd,
-                output,
-                cmd_dir,
-                output_threshold,
-            } => {
-                let cmd_str = cmd;
-                let mut cmd = self.prepare_cmd(cmd_str, cmd_dir.clone());
-
-                self.execute_cmd_impl(
-                    &mut cmd,
-                    &cmd_str
-                        .split_whitespace()
-                        .map(Into::into)
-                        .collect::<Vec<_>>(),
-                    output.clone(),
-                    *output_threshold,
-                )?;
-
-                return Ok(());
-            }
-            _ => (),
-        }
-        Err(anyhow::Error::new(DummyError).context("No cmd specified"))
-    }
-
-    fn apply_fuzzy_filter_and_rank(&self) -> Result<Vec<(String, f64, Vec<usize>)>> {
-        match &self.command {
-            Cmd::Filter { query, input, algo } => {
-                let algo = algo.as_ref().unwrap_or(&Algo::Fzy);
-
-                let scorer = |line: &str| match algo {
-                    Algo::Skim => {
-                        fuzzy_indices(line, &query).map(|(score, indices)| (score as f64, indices))
-                    }
-                    Algo::Fzy => match_and_score_with_positions(&query, line),
-                };
-
-                // Result<Option<T>> => T
-                let mut ranked = if let Some(input) = input {
-                    std::fs::read_to_string(input)?
-                        .par_lines()
-                        .filter_map(|line| {
-                            scorer(&line).map(|(score, indices)| (line.into(), score, indices))
-                        })
-                        .collect::<Vec<_>>()
-                } else {
-                    io::stdin()
-                        .lock()
-                        .lines()
-                        .filter_map(|lines_iter| {
-                            lines_iter.ok().and_then(|line| {
-                                scorer(&line).map(|(score, indices)| (line, score, indices))
-                            })
-                        })
-                        .collect::<Vec<_>>()
-                };
-
-                ranked.par_sort_unstable_by(|(_, v1, _), (_, v2, _)| v2.partial_cmp(&v1).unwrap());
-
-                Ok(ranked)
-            }
-            _ => Ok(Vec::new()),
-        }
-    }
-
-    pub fn do_filter(&self) -> Result<()> {
-        let ranked = self.apply_fuzzy_filter_and_rank()?;
-
-        if let Some(number) = self.number {
-            let total = ranked.len();
-            let payload = ranked.into_iter().take(number);
-            let mut lines = Vec::with_capacity(number);
-            let mut indices = Vec::with_capacity(number);
-            if self.enable_icon {
-                for (text, _, idxs) in payload {
-                    lines.push(prepend_icon(&text));
-                    indices.push(idxs);
-                }
-            } else {
-                for (text, _, idxs) in payload {
-                    lines.push(text);
-                    indices.push(idxs);
-                }
-            }
-            println_json!(total, lines, indices);
-        } else {
-            for (text, _, indices) in ranked.iter() {
-                println_json!(text, indices);
-            }
-        }
-
         Ok(())
     }
 }
@@ -510,12 +389,7 @@ impl Maple {
 pub fn main() -> Result<()> {
     let maple = Maple::from_args();
 
-    // if maple.try_exec_cmd().is_ok() || maple.try_exec_grep().is_ok() {
-    if maple.try_exec_cmd().is_ok() {
-        return Ok(());
-    }
-
-    maple.do_filter()?;
+    maple.run()?;
 
     Ok(())
 }
