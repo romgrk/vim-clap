@@ -25,20 +25,73 @@ arg_enum! {
 }
 
 #[derive(StructOpt, Debug)]
+enum Cmd {
+    /// Fuzzy filter the input.
+    #[structopt(name = "filter")]
+    Filter {
+        /// Initial query string
+        #[structopt(index = 1, short, long)]
+        query: String,
+
+        /// Filter algorithm
+        #[structopt(short, long, possible_values = &Algo::variants(), case_insensitive = true)]
+        algo: Option<Algo>,
+
+        /// Read input from a file instead of stdin, only absolute file path is supported.
+        #[structopt(long = "input", parse(from_os_str))]
+        input: Option<PathBuf>,
+    },
+    /// Execute the command.
+    #[structopt(name = "exec")]
+    Exec {
+        /// Specify the system command to run.
+        #[structopt(index = 1, short, long)]
+        cmd: String,
+
+        /// Specify the output file path when the output of command exceeds the threshold.
+        #[structopt(long = "output")]
+        output: Option<String>,
+
+        /// Specify the threshold for writing the output of command to a tempfile.
+        #[structopt(long = "output-threshold", default_value = "100000")]
+        output_threshold: usize,
+
+        /// Specify the working directory of CMD
+        #[structopt(long = "cmd-dir", parse(from_os_str))]
+        cmd_dir: Option<PathBuf>,
+
+        /// Prepend an icon for item of files and grep provider, valid only when --number is used.
+        #[structopt(long = "enable-icon")]
+        enable_icon: bool,
+    },
+    /// Execute the grep command to avoid the escape issue.
+    #[structopt(name = "grep")]
+    Grep {
+        /// Specify the grep command to run, normally rg will be used.
+        ///
+        /// Incase of clap can not reconginize such option: --cmd "rg --vimgrep ... "fn ul"".
+        ///                                                       |-----------------|
+        ///                                                   this can be seen as an option by mistake.
+        #[structopt(index = 1, short, long)]
+        grep_cmd: String,
+
+        /// Specify the query string for GREP_CMD.
+        #[structopt(index = 2, short, long)]
+        grep_query: String,
+
+        /// Prepend an icon for item of files and grep provider, valid only when --number is used.
+        #[structopt(long = "enable-icon")]
+        enable_icon: bool,
+
+        /// Specify the working directory of CMD
+        #[structopt(long = "cmd-dir", parse(from_os_str))]
+        cmd_dir: Option<PathBuf>,
+    },
+}
+
+#[derive(StructOpt, Debug)]
 #[structopt(name = "maple")]
 struct Maple {
-    /// Initial query string
-    #[structopt(index = 1, short, long)]
-    query: String,
-
-    /// Filter algorithm
-    #[structopt(short, long, possible_values = &Algo::variants(), case_insensitive = true)]
-    algo: Option<Algo>,
-
-    /// Read input from a file instead of stdin, only absolute file path is supported.
-    #[structopt(long = "input", parse(from_os_str))]
-    input: Option<PathBuf>,
-
     /// Print the top NUM of filtered items.
     ///
     /// The returned JSON has three fields:
@@ -48,37 +101,12 @@ struct Maple {
     #[structopt(short = "n", long = "number", name = "NUM")]
     number: Option<usize>,
 
-    /// Specify the output file path when the output of command exceeds the threshold.
-    #[structopt(long = "output")]
-    output: Option<String>,
-
-    /// Specify the threshold for writing the output of command to a tempfile.
-    #[structopt(long = "output-threshold", default_value = "100000")]
-    output_threshold: usize,
-
-    /// Specify the system command to run.
-    #[structopt(long = "cmd", name = "CMD")]
-    cmd: Option<String>,
-
-    /// Specify the grep command to run, normally rg will be used.
-    ///
-    /// Incase of clap can not reconginize such option: --cmd "rg --vimgrep ... "fn ul"".
-    ///                                                       |-----------------|
-    ///                                                   this can be seen as an option by mistake.
-    #[structopt(long = "grep-cmd", name = "GREP_CMD")]
-    grep_cmd: Option<String>,
-
-    /// Specify the query string for GREP_CMD.
-    #[structopt(long = "grep-query")]
-    grep_query: Option<String>,
-
     /// Prepend an icon for item of files and grep provider, valid only when --number is used.
     #[structopt(long = "enable-icon")]
     enable_icon: bool,
 
-    /// Specify the working directory of CMD
-    #[structopt(long = "cmd-dir", parse(from_os_str))]
-    cmd_dir: Option<PathBuf>,
+    #[structopt(subcommand)]
+    command: Cmd,
 }
 
 #[derive(Debug)]
@@ -119,19 +147,21 @@ macro_rules! println_json {
   }
 }
 
-impl Maple {
-    pub fn set_cmd_dir(&self, cmd: &mut Command) {
-        if let Some(cmd_dir) = self.cmd_dir.clone() {
-            if cmd_dir.is_dir() {
-                cmd.current_dir(cmd_dir);
-            } else {
-                let mut cmd_dir = cmd_dir;
-                cmd_dir.pop();
-                cmd.current_dir(cmd_dir);
-            }
+fn set_cmd_dir(cmd: &mut Command, cmd_dir: Option<PathBuf>) -> &mut Command {
+    if let Some(cmd_dir) = cmd_dir.clone() {
+        if cmd_dir.is_dir() {
+            cmd.current_dir(cmd_dir);
+        } else {
+            let mut cmd_dir = cmd_dir;
+            cmd_dir.pop();
+            cmd.current_dir(cmd_dir);
         }
     }
+    cmd
+}
 
+impl Maple {
+    /*
     fn to_string_and_cache_if_threshold_exceeded(
         &self,
         total: usize,
@@ -165,7 +195,45 @@ impl Maple {
             Ok((String::from_utf8_lossy(cmd_stdout).into(), None))
         }
     }
+    */
 
+    fn to_string_and_cache_if_threshold_exceeded_cmd(
+        &self,
+        total: usize,
+        cmd_stdout: &[u8],
+        args: &[String],
+        output: Option<String>,
+        output_threshold: usize,
+    ) -> Result<(String, Option<PathBuf>)> {
+        if total > output_threshold {
+            let tempfile = if let Some(ref output) = output {
+                output.into()
+            } else {
+                let mut dir = std::env::temp_dir();
+                dir.push(format!(
+                    "{}_{}",
+                    args.join("_"),
+                    SystemTime::now()
+                        .duration_since(SystemTime::UNIX_EPOCH)?
+                        .as_secs()
+                ));
+                dir
+            };
+            File::create(tempfile.clone())?.write_all(cmd_stdout)?;
+            // FIXME find the nth newline index of stdout.
+            let _end = std::cmp::min(cmd_stdout.len(), 500);
+            Ok((
+                // lines used for displaying directly.
+                // &cmd_output.stdout[..nth_newline_index]
+                String::from_utf8_lossy(cmd_stdout).into(),
+                Some(tempfile),
+            ))
+        } else {
+            Ok((String::from_utf8_lossy(cmd_stdout).into(), None))
+        }
+    }
+
+    /*
     fn execute_impl(&self, cmd: &mut Command, args: &[String]) -> Result<()> {
         let cmd_output = cmd.output()?;
 
@@ -212,43 +280,123 @@ impl Maple {
 
         Ok(())
     }
+    */
 
-    fn prepare_grep_and_args(&self, cmd_str: &str) -> (Command, Vec<String>) {
+    fn execute_cmd_impl(
+        &self,
+        cmd: &mut Command,
+        args: &[String],
+        output: Option<String>,
+        output_threshold: usize,
+        enable_icon: bool,
+    ) -> Result<()> {
+        let cmd_output = cmd.output()?;
+
+        if !cmd_output.status.success() && !cmd_output.stderr.is_empty() {
+            let error = format!("{}", String::from_utf8_lossy(&cmd_output.stderr));
+            println_json!(error);
+            std::process::exit(1);
+        }
+
+        let total = bytecount::count(&cmd_output.stdout, b'\n');
+
+        if let Some(number) = self.number {
+            // TODO: do not have to into String for whole stdout, find the nth index of newline.
+            // &cmd_output.stdout[..nth_newline_index]
+            let stdout_str = String::from_utf8_lossy(&cmd_output.stdout);
+            let mut lines = stdout_str
+                .split('\n')
+                .take(number)
+                .map(Into::into)
+                .collect::<Vec<_>>();
+            trim_trailing(&mut lines);
+            println_json!(total, lines);
+            return Ok(());
+        }
+
+        // Write the output to a tempfile if the lines are too many.
+        let (stdout_str, tempfile) = self.to_string_and_cache_if_threshold_exceeded_cmd(
+            total,
+            &cmd_output.stdout,
+            args,
+            output,
+            output_threshold,
+        )?;
+
+        let mut lines = if enable_icon {
+            stdout_str.split('\n').map(prepend_icon).collect::<Vec<_>>()
+        } else {
+            stdout_str.split('\n').map(Into::into).collect::<Vec<_>>()
+        };
+
+        // The last element could be a empty string.
+        trim_trailing(&mut lines);
+
+        if let Some(tempfile) = tempfile {
+            println_json!(total, lines, tempfile);
+        } else {
+            println_json!(total, lines);
+        }
+
+        Ok(())
+    }
+
+    fn prepare_grep_and_args(
+        &self,
+        cmd_str: &str,
+        cmd_dir: Option<PathBuf>,
+    ) -> (Command, Vec<String>) {
         let args = cmd_str
             .split_whitespace()
             .map(Into::into)
             .collect::<Vec<String>>();
         let mut cmd = Command::new(args[0].clone());
-        self.set_cmd_dir(&mut cmd);
+
+        if let Some(cmd_dir) = cmd_dir.clone() {
+            if cmd_dir.is_dir() {
+                cmd.current_dir(cmd_dir);
+            } else {
+                let mut cmd_dir = cmd_dir;
+                cmd_dir.pop();
+                cmd.current_dir(cmd_dir);
+            }
+        }
+
         (cmd, args)
     }
 
     pub fn try_exec_grep(&self) -> Result<()> {
-        if let Some(ref grep_cmd) = self.grep_cmd {
-            let (mut cmd, mut args) = self.prepare_grep_and_args(grep_cmd);
+        match &self.command {
+            Cmd::Grep {
+                grep_cmd,
+                grep_query,
+                enable_icon,
+                cmd_dir,
+            } => {
+                let (mut cmd, mut args) = self.prepare_grep_and_args(grep_cmd, cmd_dir.clone());
 
-            // We split out the grep opts and query in case of the possible escape issue of clap.
-            if let Some(grep_query) = self.grep_query.clone() {
-                args.push(grep_query);
+                // We split out the grep opts and query in case of the possible escape issue of clap.
+                args.push(grep_query.clone());
+
+                // currently vim-clap only supports rg.
+                // Ref https://github.com/liuchengxu/vim-clap/pull/60
+                if cfg!(windows) {
+                    args.push(".".into());
+                }
+
+                cmd.args(&args[1..]);
+
+                self.execute_cmd_impl(&mut cmd, &args, None, 100usize, *enable_icon)?;
+
+                return Ok(());
             }
-
-            // currently vim-clap only supports rg.
-            // Ref https://github.com/liuchengxu/vim-clap/pull/60
-            if cfg!(windows) {
-                args.push(".".into());
-            }
-
-            cmd.args(&args[1..]);
-
-            self.execute_impl(&mut cmd, &args)?;
-
-            return Ok(());
+            _ => (),
         }
         Err(anyhow::Error::new(DummyError).context("No grep cmd specified"))
     }
 
     // This can work with the piped command, e.g., git ls-files | uniq.
-    fn prepare_cmd(&self, cmd_str: &str) -> Command {
+    fn prepare_cmd(&self, cmd_str: &str, cmd_dir: Option<PathBuf>) -> Command {
         let mut cmd = if cfg!(target_os = "windows") {
             let mut cmd = Command::new("cmd");
             cmd.args(&["/C", cmd_str]);
@@ -258,61 +406,87 @@ impl Maple {
             cmd.arg("-c").arg(cmd_str);
             cmd
         };
-        self.set_cmd_dir(&mut cmd);
+
+        if let Some(cmd_dir) = cmd_dir.clone() {
+            if cmd_dir.is_dir() {
+                cmd.current_dir(cmd_dir);
+            } else {
+                let mut cmd_dir = cmd_dir;
+                cmd_dir.pop();
+                cmd.current_dir(cmd_dir);
+            }
+        }
         cmd
     }
 
     pub fn try_exec_cmd(&self) -> Result<()> {
-        if let Some(ref cmd_str) = self.cmd {
-            let mut cmd = self.prepare_cmd(cmd_str);
+        match &self.command {
+            Cmd::Exec {
+                cmd,
+                output,
+                cmd_dir,
+                enable_icon,
+                output_threshold,
+            } => {
+                let cmd_str = cmd;
+                let mut cmd = self.prepare_cmd(cmd_str, cmd_dir.clone());
 
-            self.execute_impl(
-                &mut cmd,
-                &cmd_str
-                    .split_whitespace()
-                    .map(Into::into)
-                    .collect::<Vec<_>>(),
-            )?;
+                self.execute_cmd_impl(
+                    &mut cmd,
+                    &cmd_str
+                        .split_whitespace()
+                        .map(Into::into)
+                        .collect::<Vec<_>>(),
+                    output.clone(),
+                    *output_threshold,
+                    *enable_icon,
+                )?;
 
-            return Ok(());
+                return Ok(());
+            }
+            _ => (),
         }
         Err(anyhow::Error::new(DummyError).context("No cmd specified"))
     }
 
     fn apply_fuzzy_filter_and_rank(&self) -> Result<Vec<(String, f64, Vec<usize>)>> {
-        let query = &*self.query;
-        let algo = self.algo.as_ref().unwrap_or(&Algo::Fzy);
+        match &self.command {
+            Cmd::Filter { query, input, algo } => {
+                let algo = algo.as_ref().unwrap_or(&Algo::Fzy);
 
-        let scorer = |line: &str| match algo {
-            Algo::Skim => {
-                fuzzy_indices(line, query).map(|(score, indices)| (score as f64, indices))
+                let scorer = |line: &str| match algo {
+                    Algo::Skim => {
+                        fuzzy_indices(line, &query).map(|(score, indices)| (score as f64, indices))
+                    }
+                    Algo::Fzy => match_and_score_with_positions(&query, line),
+                };
+
+                // Result<Option<T>> => T
+                let mut ranked = if let Some(input) = input {
+                    std::fs::read_to_string(input)?
+                        .par_lines()
+                        .filter_map(|line| {
+                            scorer(&line).map(|(score, indices)| (line.into(), score, indices))
+                        })
+                        .collect::<Vec<_>>()
+                } else {
+                    io::stdin()
+                        .lock()
+                        .lines()
+                        .filter_map(|lines_iter| {
+                            lines_iter.ok().and_then(|line| {
+                                scorer(&line).map(|(score, indices)| (line, score, indices))
+                            })
+                        })
+                        .collect::<Vec<_>>()
+                };
+
+                ranked.par_sort_unstable_by(|(_, v1, _), (_, v2, _)| v2.partial_cmp(&v1).unwrap());
+
+                Ok(ranked)
             }
-            Algo::Fzy => match_and_score_with_positions(query, line),
-        };
-
-        // Result<Option<T>> => T
-        let mut ranked = if let Some(input) = &self.input {
-            std::fs::read_to_string(input)?
-                .par_lines()
-                .filter_map(|line| {
-                    scorer(&line).map(|(score, indices)| (line.into(), score, indices))
-                })
-                .collect::<Vec<_>>()
-        } else {
-            io::stdin()
-                .lock()
-                .lines()
-                .filter_map(|lines_iter| {
-                    lines_iter.ok().and_then(|line| {
-                        scorer(&line).map(|(score, indices)| (line, score, indices))
-                    })
-                })
-                .collect::<Vec<_>>()
-        };
-
-        ranked.par_sort_unstable_by(|(_, v1, _), (_, v2, _)| v2.partial_cmp(&v1).unwrap());
-
-        Ok(ranked)
+            _ => Ok(Vec::new()),
+        }
     }
 
     pub fn do_filter(&self) -> Result<()> {
@@ -348,7 +522,8 @@ impl Maple {
 pub fn main() -> Result<()> {
     let maple = Maple::from_args();
 
-    if maple.try_exec_cmd().is_ok() || maple.try_exec_grep().is_ok() {
+    // if maple.try_exec_cmd().is_ok() || maple.try_exec_grep().is_ok() {
+    if maple.try_exec_cmd().is_ok() {
         return Ok(());
     }
 
