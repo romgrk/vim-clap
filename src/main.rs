@@ -59,10 +59,6 @@ enum Cmd {
         /// Specify the working directory of CMD
         #[structopt(long = "cmd-dir", parse(from_os_str))]
         cmd_dir: Option<PathBuf>,
-
-        /// Prepend an icon for item of files and grep provider, valid only when --number is used.
-        #[structopt(long = "enable-icon")]
-        enable_icon: bool,
     },
     /// Execute the grep command to avoid the escape issue.
     #[structopt(name = "grep")]
@@ -78,10 +74,6 @@ enum Cmd {
         /// Specify the query string for GREP_CMD.
         #[structopt(index = 2, short, long)]
         grep_query: String,
-
-        /// Prepend an icon for item of files and grep provider, valid only when --number is used.
-        #[structopt(long = "enable-icon")]
-        enable_icon: bool,
 
         /// Specify the working directory of CMD
         #[structopt(long = "cmd-dir", parse(from_os_str))]
@@ -288,7 +280,6 @@ impl Maple {
         args: &[String],
         output: Option<String>,
         output_threshold: usize,
-        enable_icon: bool,
     ) -> Result<()> {
         let cmd_output = cmd.output()?;
 
@@ -323,7 +314,7 @@ impl Maple {
             output_threshold,
         )?;
 
-        let mut lines = if enable_icon {
+        let mut lines = if self.enable_icon {
             stdout_str.split('\n').map(prepend_icon).collect::<Vec<_>>()
         } else {
             stdout_str.split('\n').map(Into::into).collect::<Vec<_>>()
@@ -370,7 +361,6 @@ impl Maple {
             Cmd::Grep {
                 grep_cmd,
                 grep_query,
-                enable_icon,
                 cmd_dir,
             } => {
                 let (mut cmd, mut args) = self.prepare_grep_and_args(grep_cmd, cmd_dir.clone());
@@ -386,7 +376,7 @@ impl Maple {
 
                 cmd.args(&args[1..]);
 
-                self.execute_cmd_impl(&mut cmd, &args, None, 100usize, *enable_icon)?;
+                self.execute_cmd_impl(&mut cmd, &args, None, 100usize)?;
 
                 return Ok(());
             }
@@ -425,7 +415,6 @@ impl Maple {
                 cmd,
                 output,
                 cmd_dir,
-                enable_icon,
                 output_threshold,
             } => {
                 let cmd_str = cmd;
@@ -439,7 +428,6 @@ impl Maple {
                         .collect::<Vec<_>>(),
                     output.clone(),
                     *output_threshold,
-                    *enable_icon,
                 )?;
 
                 return Ok(());
