@@ -223,6 +223,86 @@ fn truncate_stdout(stdout: &[u8], number: usize) -> Vec<String> {
 
 struct LightCommand<'a> {
     cmd: &'a mut Command,
+    total: usize,
+    number: Option<usize>,
+    output: Option<String>,
+    enable_icon: bool,
+    output_threshold: usize,
+}
+
+impl<'a> LightCommand<'a> {
+    fn output(&mut self) -> Result<Output> {
+        let cmd_output = self.cmd.output()?;
+
+        // vim-clap does not handle the stderr stream, we just pass the error info via stdout.
+        if !cmd_output.status.success() && !cmd_output.stderr.is_empty() {
+            let error = format!("{}", String::from_utf8_lossy(&cmd_output.stderr));
+            println_json!(error);
+            std::process::exit(1);
+        }
+
+        Ok(cmd_output)
+    }
+
+    fn try_truncate(&self, stdout: &[u8]) -> Result<()> {
+        if let Some(number) = self.number {
+            let lines = truncate_stdout(stdout, number);
+            println_json!(self.total, lines);
+            return Ok(());
+        }
+        Err(anyhow::Error::new(DummyError).context("No truncation"))
+    }
+
+    fn try_cache(&self, stdout: &[u8], args: &[String]) -> Result<(String, Option<PathBuf>)> {
+        if self.output_threshold != 0 && self.total > self.output_threshold {
+            let tempfile = if let Some(ref output) = self.output {
+                output.into()
+            } else {
+                tempfile(args)?
+            };
+            File::create(tempfile.clone())?.write_all(stdout)?;
+            Ok((
+                // TODO: &cmd_output.stdout[..nth_newline_index]
+                // lines used for displaying directly.
+                String::from_utf8_lossy(stdout).to_string(),
+                Some(tempfile),
+            ))
+        } else {
+            Ok((String::from_utf8_lossy(stdout).to_string(), None))
+        }
+    }
+
+    fn execute(&mut self, args: &[String]) -> Result<()> {
+        let cmd_output = self.output()?;
+        let cmd_stdout = &cmd_output.stdout;
+
+        self.total = bytecount::count(cmd_stdout, b'\n');
+
+        if self.try_truncate(cmd_stdout).is_ok() {
+            return Ok(());
+        }
+
+        let (stdout_str, tempfile) = self.try_cache(cmd_stdout, args)?;
+
+        let mut lines = if self.enable_icon {
+            stdout_str.split('\n').map(prepend_icon).collect::<Vec<_>>()
+        } else {
+            stdout_str.split('\n').map(Into::into).collect::<Vec<_>>()
+        };
+
+        // The last element could be a empty string.
+        trim_trailing(&mut lines);
+
+        let total = self.total;
+
+        if let Some(tempfile) = tempfile {
+            println_json!(total, lines, tempfile);
+        } else {
+            println_json!(total, lines);
+        }
+
+        Ok(())
+    }
 }
 
 fn try_cache(
