@@ -166,6 +166,7 @@ fn cmd_output(cmd: &mut Command) -> Result<Output> {
 
 fn set_current_dir(cmd: &mut Command, cmd_dir: Option<PathBuf>) {
     if let Some(cmd_dir) = cmd_dir {
+        // If cmd_dir is not a directory, use its parent as current dir.
         if cmd_dir.is_dir() {
             cmd.current_dir(cmd_dir);
         } else {
@@ -206,6 +207,7 @@ fn prepare_exec_cmd(cmd_str: &str, cmd_dir: Option<PathBuf>) -> Command {
     cmd
 }
 
+// Take the top number lines from stdout bytestream.
 fn truncate_stdout(stdout: &[u8], number: usize) -> Vec<String> {
     // TODO: do not have to into String for whole stdout, find the nth index of newline.
     // &cmd_output.stdout[..nth_newline_index]
@@ -219,8 +221,37 @@ fn truncate_stdout(stdout: &[u8], number: usize) -> Vec<String> {
     lines
 }
 
+struct LightCommand<'a> {
+    cmd: &'a mut Command,
+}
+
+fn try_cache(
+    stdout: &[u8],
+    total: usize,
+    args: &[String],
+    output: &Option<String>,
+    output_threshold: usize,
+) -> Result<(String, Option<PathBuf>)> {
+    if output_threshold != 0 && total > output_threshold {
+        let tempfile = if let Some(ref output) = output {
+            output.into()
+        } else {
+            tempfile(args)?
+        };
+        File::create(tempfile.clone())?.write_all(stdout)?;
+        Ok((
+            // TODO: &cmd_output.stdout[..nth_newline_index]
+            // lines used for displaying directly.
+            String::from_utf8_lossy(stdout).to_string(),
+            Some(tempfile),
+        ))
+    } else {
+        Ok((String::from_utf8_lossy(stdout).to_string(), None))
+    }
+}
+
 impl Maple {
-    fn execute_cmd_impl(
+    fn execute_impl(
         &self,
         cmd: &mut Command,
         args: &[String],
@@ -228,7 +259,6 @@ impl Maple {
         output_threshold: usize,
     ) -> Result<()> {
         let cmd_output = cmd_output(cmd)?;
-
         let cmd_stdout = &cmd_output.stdout;
 
         let total = bytecount::count(cmd_stdout, b'\n');
@@ -239,24 +269,7 @@ impl Maple {
             return Ok(());
         }
 
-        let (stdout_str, tempfile) = if total > output_threshold {
-            let tempfile = if let Some(ref output) = output {
-                output.into()
-            } else {
-                tempfile(args)?
-            };
-            File::create(tempfile.clone())?.write_all(cmd_stdout)?;
-            // FIXME find the nth newline index of stdout.
-            let _end = std::cmp::min(cmd_stdout.len(), 500);
-            (
-                // lines used for displaying directly.
-                // &cmd_output.stdout[..nth_newline_index]
-                String::from_utf8_lossy(cmd_stdout),
-                Some(tempfile),
-            )
-        } else {
-            (String::from_utf8_lossy(cmd_stdout), None)
-        };
+        let (stdout_str, tempfile) = try_cache(cmd_stdout, total, args, output, output_threshold)?;
 
         let mut lines = if self.enable_icon {
             stdout_str.split('\n').map(prepend_icon).collect::<Vec<_>>()
@@ -353,7 +366,7 @@ impl Maple {
             } => {
                 let mut exec_cmd = prepare_exec_cmd(cmd, cmd_dir.clone());
 
-                self.execute_cmd_impl(
+                self.execute_impl(
                     &mut exec_cmd,
                     &cmd.split_whitespace().map(Into::into).collect::<Vec<_>>(),
                     output,
@@ -379,7 +392,7 @@ impl Maple {
 
                 cmd.args(&args[1..]);
 
-                self.execute_cmd_impl(&mut cmd, &args, &None, 100usize)?;
+                self.execute_impl(&mut cmd, &args, &None, 0usize)?;
             }
         }
         Ok(())
