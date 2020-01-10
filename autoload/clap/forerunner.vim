@@ -135,15 +135,21 @@ endif
 if clap#maple#is_available()
   let s:empty_filter_cmd = printf(clap#maple#filter_cmd_fmt(), '')
 
+  " TODO flags
+  let s:exec_cmd = g:clap#maple#bin.' --enable-icon exec'
+
   function! s:into_maple_cmd(cmd) abort
     let cmd_dir = clap#rooter#working_dir()
-    let cmd = printf('%s --cmd "%s" --cmd-dir "%s" --output-threshold %d',
-          \ s:empty_filter_cmd,
+    let cmd = printf('exec "%s" --cmd-dir "%s" --output-threshold %d',
           \ a:cmd,
           \ cmd_dir,
           \ s:builtin_fuzzy_filter_threshold,
           \ )
 
+    let cmd = g:clap#maple#bin.' --enable-icon '.cmd
+
+    return cmd
+    " FIXME
     return clap#maple#try_enable_icon(cmd)
   endfunction
 

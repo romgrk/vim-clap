@@ -18,10 +18,14 @@ if executable(s:maple_bin_localbuilt)
   let s:maple_filter_cmd = s:maple_bin_localbuilt.' "%s"'
   let s:empty_filter_cmd = printf(s:maple_filter_cmd, '')
 
+  let g:clap#maple#bin = s:maple_bin_localbuilt
+
 " Check the prebuilt binary.
 elseif executable(s:maple_bin_prebuilt)
   let s:maple_filter_cmd = s:maple_bin_prebuilt.' "%s"'
   let s:empty_filter_cmd = printf(s:maple_filter_cmd, '')
+
+  let g:clap#maple#bin = s:maple_bin_prebuilt
 
 elseif executable('maple')
   let s:maple_filter_cmd = 'maple "%s"'
@@ -156,11 +160,14 @@ function! clap#maple#job_start(cmd) abort
 
   call clap#maple#stop()
 
-  let s:cmd = a:cmd.' --number '.g:clap.display.preload_capacity
+  let s:cmd = a:cmd
 
-  if g:clap.provider.id ==# 'files' && g:clap_enable_icon
-    let s:cmd .= ' --enable-icon'
-  endif
+  " let s:cmd = a:cmd.' --number '.g:clap.display.preload_capacity
+
+
+  " if g:clap.provider.id ==# 'files' && g:clap_enable_icon
+    " let s:cmd .= ' --enable-icon'
+  " endif
 
   let s:job_timer = timer_start(s:maple_delay, function('s:apply_start'))
   return
@@ -194,12 +201,14 @@ endfunction
 
 function! clap#maple#grep(bare_cmd, query) abort
   let cmd_dir = clap#rooter#working_dir()
-  let cmd = printf('%s --grep-cmd "%s" --grep-query "%s" --cmd-dir "%s"',
-        \ s:empty_filter_cmd,
+  let cmd = printf('grep "%s" "%s" --cmd-dir "%s"',
         \ a:bare_cmd,
         \ a:query,
         \ cmd_dir,
         \ )
+
+  let cmd = g:clap#maple#bin.' --enable-icon --number '.g:clap.display.preload_capacity.' '.cmd
+
   call clap#maple#job_start(cmd)
 endfunction
 
