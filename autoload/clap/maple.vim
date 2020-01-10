@@ -15,21 +15,21 @@ let s:maple_bin_prebuilt = fnamemodify(g:clap#autoload_dir, ':h').'/bin/maple'.s
 
 " Check the local built.
 if executable(s:maple_bin_localbuilt)
-  let s:maple_filter_cmd = s:maple_bin_localbuilt.' "%s"'
+  let s:maple_filter_cmd = s:maple_bin_localbuilt.' filter "%s"'
   let s:empty_filter_cmd = printf(s:maple_filter_cmd, '')
 
   let g:clap#maple#bin = s:maple_bin_localbuilt
 
 " Check the prebuilt binary.
 elseif executable(s:maple_bin_prebuilt)
-  let s:maple_filter_cmd = s:maple_bin_prebuilt.' "%s"'
+  let s:maple_filter_cmd = s:maple_bin_prebuilt.' filter "%s"'
   let s:empty_filter_cmd = printf(s:maple_filter_cmd, '')
 
   let g:clap#maple#bin = s:maple_bin_prebuilt
 
 elseif executable('maple')
-  let s:maple_filter_cmd = 'maple "%s"'
-  let s:empty_filter_cmd = 'maple ""'
+  let s:maple_filter_cmd = 'maple filter "%s"'
+  let s:empty_filter_cmd = 'maple filter ""'
 else
   let s:maple_filter_cmd = v:null
 endif
@@ -40,6 +40,10 @@ endfunction
 
 function! clap#maple#filter_cmd_fmt() abort
   return s:maple_filter_cmd
+endfunction
+
+function! clap#maple#into_cmd(top_flag_and_option, subcommand) abort
+  return printf('%s %s %s', g:clap#maple#bin, a:top_flag_and_option, a:subcommand)
 endfunction
 
 function! s:on_complete() abort
@@ -210,6 +214,15 @@ function! clap#maple#grep(bare_cmd, query) abort
   let cmd = g:clap#maple#bin.' --enable-icon --number '.g:clap.display.preload_capacity.' '.cmd
 
   call clap#maple#job_start(cmd)
+endfunction
+
+function! clap#maple#exec_subcommand(cmd) abort
+  let cmd_dir = clap#rooter#working_dir()
+endfunction
+
+function! clap#maple#grep_subcommand(cmd, query) abort
+  let cmd_dir = clap#rooter#working_dir()
+  return printf('grep "%s" "%s" --cmd-dir "%s"', a:cmd, a:query, cmd_dir)
 endfunction
 
 let &cpoptions = s:save_cpo

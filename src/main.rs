@@ -310,7 +310,6 @@ impl Maple {
                     }
                 }
             }
-
             Cmd::Exec {
                 cmd,
                 output,
@@ -329,7 +328,6 @@ impl Maple {
 
                 light_cmd.execute(&cmd.split_whitespace().map(Into::into).collect::<Vec<_>>())?;
             }
-
             Cmd::Grep {
                 grep_cmd,
                 grep_query,
